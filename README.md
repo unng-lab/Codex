@@ -30,12 +30,18 @@ go run ./cmd/chatmock
 CHATMOCK_OLLAMA_BASE_URL=http://localhost:11434 \
 CHATMOCK_OLLAMA_MODEL_PREFIX=ollama/ \
 CHATMOCK_CODEX_BASE_URL=https://api.openai.com \
-CHATMOCK_CODEX_API_KEY=sk-... \
+CHATMOCK_CODEX_ACCESS_TOKEN=sk-... \
 CHATMOCK_CODEX_MODEL_PREFIX=codex/ \
 CHATMOCK_CHATGPT_BASE_URL=https://chatgpt.com \
 CHATMOCK_CHATGPT_ACCESS_TOKEN=<access_token> \
 CHATMOCK_CHATGPT_ACCOUNT_ID=<chatgpt_account_id> \
 CHATMOCK_CHATGPT_MODEL_PREFIX=chatgpt/ \
+go run ./cmd/chatmock
+```
+
+Альтернатива (удобно, если у вас уже есть JSON-бандл с токенами):
+```bash
+CHATMOCK_CHATGPT_TOKENS_FILE=./chatgpt.tokens.json \
 go run ./cmd/chatmock
 ```
 
