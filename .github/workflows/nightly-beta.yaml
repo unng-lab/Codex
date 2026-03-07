@@ -1,0 +1,43 @@
+name: Nightly Beta
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  beta-manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate beta manifest placeholder
+        run: |
+          mkdir -p dist/beta
+          cat > dist/beta/manifest.json <<EOF
+          {
+            "version": "beta-${GITHUB_SHA}",
+            "channel": "beta",
+            "published_at": "${GITHUB_RUN_ID}",
+            "notes_url": "https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}",
+            "platforms": {}
+          }
+          EOF
+
+      - name: Sign beta manifest
+        if: ${{ vars.RELEASE_SIGNING_PUBLIC_KEY_B64 != '' && secrets.RELEASE_SIGNING_PRIVATE_KEY_PEM_B64 != '' }}
+        env:
+          RELEASE_SIGNING_PRIVATE_KEY_PEM_B64: ${{ secrets.RELEASE_SIGNING_PRIVATE_KEY_PEM_B64 }}
+        run: |
+          printf '%s' "${RELEASE_SIGNING_PRIVATE_KEY_PEM_B64}" | base64 -d > dist/beta/private_key.pem
+          jq -c 'del(.signature)' dist/beta/manifest.json > dist/beta/manifest.payload.json
+          openssl pkeyutl -sign -inkey dist/beta/private_key.pem -rawin -in dist/beta/manifest.payload.json -out dist/beta/manifest.sig
+          SIG=$(base64 -w 0 dist/beta/manifest.sig)
+          jq --arg sig "${SIG}" '.signature = $sig' dist/beta/manifest.json > dist/beta/manifest.signed.json
+          mv dist/beta/manifest.signed.json dist/beta/manifest.json
+          rm -f dist/beta/private_key.pem dist/beta/manifest.payload.json dist/beta/manifest.sig
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: beta-manifest
+          path: dist/beta/manifest.json

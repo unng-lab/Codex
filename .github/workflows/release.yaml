@@ -1,0 +1,139 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+            platform: windows-amd64
+          - goos: linux
+            goarch: amd64
+            platform: linux-amd64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build release bundle
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+          UPDATE_PUBLIC_KEY: ${{ vars.RELEASE_SIGNING_PUBLIC_KEY_B64 }}
+        run: |
+          mkdir -p dist/${{ matrix.platform }}/bundle
+          EXT=""
+          if [ "${GOOS}" = "windows" ]; then
+            EXT=".exe"
+          fi
+          BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          LDFLAGS="-X brainhub/internal/buildinfo.Version=${VERSION} -X brainhub/internal/buildinfo.Commit=${COMMIT} -X brainhub/internal/buildinfo.BuildDate=${BUILD_DATE} -X brainhub/internal/buildinfo.Channel=stable -X brainhub/internal/buildinfo.UpdatePublicKey=${UPDATE_PUBLIC_KEY}"
+          go build -trimpath -ldflags "$LDFLAGS" -o dist/${{ matrix.platform }}/bundle/login${EXT} ./cmd/login
+          go build -trimpath -ldflags "$LDFLAGS" -o dist/${{ matrix.platform }}/bundle/proxy${EXT} ./cmd/proxy
+          go build -trimpath -ldflags "$LDFLAGS" -o dist/${{ matrix.platform }}/bundle/updater${EXT} ./cmd/updater
+          if [ "${GOOS}" = "windows" ]; then
+            go build -trimpath -ldflags "$LDFLAGS" -o dist/${{ matrix.platform }}/bundle/proxytray.exe ./cmd/proxytray
+          fi
+          cd dist/${{ matrix.platform }}/bundle
+          zip -r ../bundle.zip .
+          cd ..
+          sha256sum bundle.zip | awk '{print $1}' > bundle.sha256
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: dist/${{ matrix.platform }}
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Build manifest
+        run: |
+          mkdir -p release
+          WINDOWS_SHA=$(cat release-artifacts/windows-amd64/bundle.sha256)
+          LINUX_SHA=$(cat release-artifacts/linux-amd64/bundle.sha256)
+          cat > release/manifest.json <<EOF
+          {
+            "version": "${GITHUB_REF_NAME}",
+            "channel": "stable",
+            "published_at": "${GITHUB_RUN_ID}",
+            "notes_url": "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${GITHUB_REF_NAME}",
+            "platforms": {
+              "windows-amd64": {
+                "url": "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/windows-amd64-bundle.zip",
+                "sha256": "${WINDOWS_SHA}"
+              },
+              "linux-amd64": {
+                "url": "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/linux-amd64-bundle.zip",
+                "sha256": "${LINUX_SHA}"
+              }
+            }
+          }
+          EOF
+
+      - name: Validate signing configuration
+        env:
+          UPDATE_PUBLIC_KEY: ${{ vars.RELEASE_SIGNING_PUBLIC_KEY_B64 }}
+          RELEASE_SIGNING_PRIVATE_KEY_PEM_B64: ${{ secrets.RELEASE_SIGNING_PRIVATE_KEY_PEM_B64 }}
+        run: |
+          if [ -n "${UPDATE_PUBLIC_KEY}" ] && [ -z "${RELEASE_SIGNING_PRIVATE_KEY_PEM_B64}" ]; then
+            echo "Public key configured but private key secret is missing" >&2
+            exit 1
+          fi
+          if [ -z "${UPDATE_PUBLIC_KEY}" ] && [ -n "${RELEASE_SIGNING_PRIVATE_KEY_PEM_B64}" ]; then
+            echo "Private key secret configured but public key variable is missing" >&2
+            exit 1
+          fi
+
+      - name: Sign manifest
+        if: ${{ vars.RELEASE_SIGNING_PUBLIC_KEY_B64 != '' && secrets.RELEASE_SIGNING_PRIVATE_KEY_PEM_B64 != '' }}
+        env:
+          RELEASE_SIGNING_PRIVATE_KEY_PEM_B64: ${{ secrets.RELEASE_SIGNING_PRIVATE_KEY_PEM_B64 }}
+        run: |
+          printf '%s' "${RELEASE_SIGNING_PRIVATE_KEY_PEM_B64}" | base64 -d > release/private_key.pem
+          jq -c 'del(.signature)' release/manifest.json > release/manifest.payload.json
+          openssl pkeyutl -sign -inkey release/private_key.pem -rawin -in release/manifest.payload.json -out release/manifest.sig
+          SIG=$(base64 -w 0 release/manifest.sig)
+          jq --arg sig "${SIG}" '.signature = $sig' release/manifest.json > release/manifest.signed.json
+          mv release/manifest.signed.json release/manifest.json
+          rm -f release/private_key.pem release/manifest.payload.json release/manifest.sig
+
+      - name: Rename artifacts
+        run: |
+          cp release-artifacts/windows-amd64/bundle.zip release/windows-amd64-bundle.zip
+          cp release-artifacts/linux-amd64/bundle.zip release/linux-amd64-bundle.zip
+          cat release-artifacts/windows-amd64/bundle.sha256 > release/windows-amd64-bundle.sha256
+          cat release-artifacts/linux-amd64/bundle.sha256 > release/linux-amd64-bundle.sha256
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/manifest.json
+            release/windows-amd64-bundle.zip
+            release/windows-amd64-bundle.sha256
+            release/linux-amd64-bundle.zip
+            release/linux-amd64-bundle.sha256
